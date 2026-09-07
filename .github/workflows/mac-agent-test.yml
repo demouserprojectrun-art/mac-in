@@ -55,11 +55,11 @@ jobs:
       - name: Start Mac Agent
         run: |
           cd mac-agent
-          node index.js &
+          nohup node index.js > mac-agent.log 2>&1 &
           echo "MAC_AGENT_PID=$!" >> $GITHUB_ENV
           
           # Wait for health check
-          for i in {1..15}; do
+          for i in {1..30}; do
             if curl -s http://localhost:3001/health >/dev/null; then
               echo "Mac Agent is healthy"
               break
@@ -68,7 +68,11 @@ jobs:
           done
 
           # Verify agent is running
-          curl -s http://localhost:3001/health | python3 -m json.tool
+          if ! curl -s http://localhost:3001/health | python3 -m json.tool; then
+            echo "Mac Agent failed to start. Logs:"
+            cat mac-agent.log
+            exit 1
+          fi
 
       - name: Expose agent via ngrok
         env:
@@ -118,12 +122,17 @@ jobs:
       - name: Start session automatically
         run: |
           echo "Starting simulator session..."
-          SESSION=$(curl -s -X POST http://localhost:3001/session/start \
+          SESSION=$(curl -s -S -X POST http://localhost:3001/session/start \
             -H "Content-Type: application/json" \
-            -d "{\"appZipUrl\": \"${{ github.event.inputs.app_zip_url }}\"}")
+            -d "{\"appZipUrl\": \"${{ github.event.inputs.app_zip_url }}\"}" || {
+              echo "curl failed with exit code $?!"
+              echo "=== Mac Agent Log ==="
+              cat mac-agent/mac-agent.log 2>/dev/null || true
+              exit 1
+            })
 
           echo "Session response:"
-          echo "$SESSION" | python3 -m json.tool
+          echo "$SESSION" | python3 -m json.tool || echo "$SESSION"
 
           SESSION_ID=$(echo "$SESSION" | python3 -c "
           import json,sys
@@ -133,6 +142,14 @@ jobs:
           except:
               pass
           ")
+
+          if [ -z "$SESSION_ID" ]; then
+            echo "Failed to obtain sessionId from response!"
+            echo "=== Mac Agent Log ==="
+            cat mac-agent/mac-agent.log 2>/dev/null || true
+            exit 1
+          fi
+
           echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
           echo ""
           echo "========================================"
@@ -145,6 +162,13 @@ jobs:
         with:
           limit-access-to-actor: false
         timeout-minutes: ${{ fromJSON(github.event.inputs.session_duration) }}
+
+      - name: Print Mac Agent Logs
+        if: always()
+        run: |
+          echo "=== Mac Agent Log ==="
+          cat mac-agent/mac-agent.log 2>/dev/null || true
+          echo "======================"
 
       - name: Cleanup
         if: always()

@@ -5,9 +5,22 @@ import { createServer } from 'http'
 import { v4 as uuidv4 } from 'uuid'
 import { SimulatorManager } from './simulator.js'
 
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught Exception:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled Rejection:', reason)
+})
+
 const PORT = process.env.PORT || 3001
 const app = express()
 const server = createServer(app)
+
+// Increase timeouts for long simulator boot / download operations (10 mins)
+server.timeout = 600000
+server.keepAliveTimeout = 600000
+server.headersTimeout = 610000
+
 const wss = new WebSocketServer({ server })
 
 app.use(cors())

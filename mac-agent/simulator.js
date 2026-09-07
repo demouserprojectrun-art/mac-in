@@ -46,7 +46,7 @@ export class SimulatorManager {
     await this.waitForBoot(udid)
     console.log(`✓ Simulator booted: ${udid}`)
 
-    // Start idb-companion if installed
+      // Start idb-companion if installed
     await this.startIdb(udid)
   }
 
@@ -57,6 +57,9 @@ export class SimulatorManager {
       const companion = spawn('idb-companion', ['--udid', udid, '--port', '10882'], {
         detached: true,
         stdio: 'ignore'
+      })
+      companion.on('error', (err) => {
+        console.warn(`idb-companion spawn warning: ${err.message}`)
       })
       companion.unref()
       this.activeCompanions.set(udid, companion)
@@ -78,6 +81,13 @@ export class SimulatorManager {
 
   // Wait until simulator is fully booted
   async waitForBoot(udid, timeout = 120000) {
+    try {
+      await execAsync(`xcrun simctl bootstatus "${udid}" -b`, { timeout: 60000 })
+      return true
+    } catch (e) {
+      console.log(`bootstatus note: ${e.message}, checking device status...`)
+    }
+
     const start = Date.now()
     while (Date.now() - start < timeout) {
       try {
@@ -113,8 +123,14 @@ export class SimulatorManager {
     fs.writeFileSync(zipPath, Buffer.from(buffer))
     console.log(`✓ Downloaded: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB`)
 
-    // Extract zip
-    await extractZip(zipPath, { dir: appDir })
+    // Extract zip (native unzip preserves symlinks and permissions better in .app bundles)
+    try {
+      await execAsync(`unzip -q -o "${zipPath}" -d "${appDir}"`)
+      console.log('✓ Extracted app using native unzip')
+    } catch (unzipErr) {
+      console.warn(`Native unzip failed (${unzipErr.message}), falling back to extract-zip...`)
+      await extractZip(zipPath, { dir: appDir })
+    }
 
     // Find .app bundle (supports top-level or nested e.g. Payload/)
     const findAppBundle = (dir) => {

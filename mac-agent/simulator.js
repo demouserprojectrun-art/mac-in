@@ -54,9 +54,35 @@ export class SimulatorManager {
   async startIdb(udid) {
     try {
       console.log(`Starting idb-companion for ${udid}...`)
-      const companion = spawn('idb-companion', ['--udid', udid, '--port', '10882'], {
+      const candidates = [
+        '/opt/homebrew/bin/idb_companion',
+        '/opt/homebrew/bin/idb-companion',
+        '/usr/local/bin/idb_companion',
+        '/usr/local/bin/idb-companion',
+        'idb_companion',
+        'idb-companion'
+      ]
+      let binPath = candidates.find(p => {
+        try { return fs.existsSync(p) } catch { return false }
+      })
+      if (!binPath) {
+        try {
+          const { stdout } = await execAsync('which idb_companion || which idb-companion')
+          binPath = stdout.trim().split('\n')[0]
+        } catch {}
+      }
+      binPath = binPath || 'idb_companion'
+      console.log(`Using idb-companion binary: ${binPath}`)
+
+      const env = {
+        ...process.env,
+        PATH: `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${process.env.PATH || ''}`
+      }
+
+      const companion = spawn(binPath, ['--udid', udid, '--port', '10882'], {
         detached: true,
-        stdio: 'ignore'
+        stdio: 'ignore',
+        env
       })
       companion.on('error', (err) => {
         console.warn(`idb-companion spawn warning: ${err.message}`)
@@ -69,7 +95,7 @@ export class SimulatorManager {
 
       // Connect idb client
       try {
-        await execAsync('idb connect localhost 10882')
+        await execAsync('idb connect localhost 10882', { env })
         console.log(`✓ idb connected to simulator ${udid}`)
       } catch (e) {
         console.log(`idb connect note: ${e.message}`)
@@ -116,9 +142,42 @@ export class SimulatorManager {
     fs.mkdirSync(tmpDir, { recursive: true })
     fs.mkdirSync(appDir, { recursive: true })
 
+    // Inspect URL and token expiry
+    try {
+      const parsedUrl = new URL(appZipUrl)
+      console.log(`Download source: ${parsedUrl.origin}${parsedUrl.pathname}`)
+      const token = parsedUrl.searchParams.get('token')
+      if (token) {
+        try {
+          const parts = token.split('.')
+          if (parts.length >= 2) {
+            const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'))
+            if (payload.exp) {
+              const expDate = new Date(payload.exp * 1000)
+              const now = new Date()
+              const diffSec = Math.round((expDate.getTime() - now.getTime()) / 1000)
+              console.log(`Token expiry: ${expDate.toISOString()} (${diffSec > 0 ? `${diffSec}s remaining` : `EXPIRED ${Math.abs(diffSec)}s AGO`})`)
+              if (diffSec <= 0) {
+                console.error(`❌ Supabase signed URL has EXPIRED! Please generate a new signed URL with longer expiry (e.g. 3600 seconds).`)
+              }
+            }
+          }
+        } catch {}
+      }
+    } catch (e) {
+      console.warn(`URL parse warning: ${e.message}`)
+    }
+
     // Download app.zip
     const response = await fetch(appZipUrl)
-    if (!response.ok) throw new Error(`Download failed: ${response.status}`)
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '')
+      let hint = ''
+      if (response.status === 400) {
+        hint = ' (Check if signed URL has expired or if token parameter is invalid)'
+      }
+      throw new Error(`Download failed: ${response.status} ${response.statusText}${hint} - Response: ${errorBody}`)
+    }
     const buffer = await response.arrayBuffer()
     fs.writeFileSync(zipPath, Buffer.from(buffer))
     console.log(`✓ Downloaded: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB`)

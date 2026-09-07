@@ -120,11 +120,16 @@ jobs:
           echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
 
       - name: Start session automatically
+        env:
+          APP_ZIP_URL: ${{ github.event.inputs.app_zip_url }}
         run: |
           echo "Starting simulator session..."
+          # Safely encode JSON payload via python to avoid bash quoting/escaping bugs
+          JSON_PAYLOAD=$(python3 -c 'import json, os; print(json.dumps({"appZipUrl": os.environ["APP_ZIP_URL"].strip()}))')
+
           SESSION=$(curl -s -S -X POST http://localhost:3001/session/start \
             -H "Content-Type: application/json" \
-            -d "{\"appZipUrl\": \"${{ github.event.inputs.app_zip_url }}\"}" || {
+            -d "$JSON_PAYLOAD" || {
               echo "curl failed with exit code $?!"
               echo "=== Mac Agent Log ==="
               cat mac-agent/mac-agent.log 2>/dev/null || true

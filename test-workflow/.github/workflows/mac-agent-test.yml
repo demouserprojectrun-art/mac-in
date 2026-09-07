@@ -1,0 +1,157 @@
+name: Peekaboo Mac Agent Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_zip_url:
+        description: 'Supabase signed URL for app.zip'
+        required: true
+      session_duration:
+        description: 'How long to keep session alive (minutes)'
+        default: '30'
+        required: false
+
+jobs:
+  run-agent:
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Mac Agent dependencies
+        run: |
+          cd mac-agent
+          npm install
+
+      - name: List available simulators
+        run: |
+          echo "=== Available Simulators ==="
+          xcrun simctl list devices available
+          echo "============================"
+
+      - name: Install idb for touch & gesture support
+        run: |
+          echo "Installing idb-companion and fb-idb..."
+          brew tap facebook/fb
+          brew install idb-companion
+          pip3 install --break-system-packages fb-idb || pip3 install fb-idb
+          echo "idb installed successfully"
+
+      - name: Install ngrok for public URL
+        run: |
+          brew install ngrok/ngrok/ngrok
+          echo "ngrok installed"
+
+      - name: Start Mac Agent
+        run: |
+          cd mac-agent
+          node index.js &
+          echo "MAC_AGENT_PID=$!" >> $GITHUB_ENV
+          
+          # Wait for health check
+          for i in {1..15}; do
+            if curl -s http://localhost:3001/health >/dev/null; then
+              echo "Mac Agent is healthy"
+              break
+            fi
+            sleep 1
+          done
+
+          # Verify agent is running
+          curl -s http://localhost:3001/health | python3 -m json.tool
+
+      - name: Expose agent via ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          if [ -n "$NGROK_AUTHTOKEN" ]; then
+            ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          fi
+          # Start ngrok tunnel
+          ngrok http 3001 --log=stdout &
+
+          # Poll for public URL
+          NGROK_URL=""
+          for i in {1..15}; do
+            NGROK_URL=$(curl -s http://localhost:4040/api/tunnels \
+              | python3 -c "
+          import json,sys
+          try:
+              data=json.load(sys.stdin)
+              tunnels=data.get('tunnels',[])
+              for t in tunnels:
+                  if t.get('proto')=='https':
+                      print(t['public_url'])
+                      break
+          except:
+              pass
+          " 2>/dev/null || true)
+            if [ -n "$NGROK_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo "========================================"
+          echo "🚀 MAC AGENT PUBLIC URL:"
+          echo "$NGROK_URL"
+          echo "========================================"
+          echo ""
+          echo "Open this in your browser to test:"
+          echo "frontend/preview.html"
+          echo ""
+          echo "Set Agent URL to: $NGROK_URL"
+          echo "Set App ZIP URL to: ${{ github.event.inputs.app_zip_url }}"
+          echo "========================================"
+          echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
+
+      - name: Start session automatically
+        run: |
+          echo "Starting simulator session..."
+          SESSION=$(curl -s -X POST http://localhost:3001/session/start \
+            -H "Content-Type: application/json" \
+            -d "{\"appZipUrl\": \"${{ github.event.inputs.app_zip_url }}\"}")
+
+          echo "Session response:"
+          echo "$SESSION" | python3 -m json.tool
+
+          SESSION_ID=$(echo "$SESSION" | python3 -c "
+          import json,sys
+          try:
+              data=json.load(sys.stdin)
+              print(data.get('sessionId',''))
+          except:
+              pass
+          ")
+          echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
+          echo ""
+          echo "========================================"
+          echo "✓ Session started: $SESSION_ID"
+          echo "WebSocket URL: $NGROK_URL/stream/$SESSION_ID"
+          echo "========================================"
+
+      - name: Enable SSH access for debugging
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: false
+        timeout-minutes: ${{ fromJSON(github.event.inputs.session_duration) }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -n "$SESSION_ID" ]; then
+            curl -s -X POST http://localhost:3001/session/end \
+              -H "Content-Type: application/json" \
+              -d "{\"sessionId\": \"$SESSION_ID\"}" || true
+          fi
+          if [ -n "$MAC_AGENT_PID" ]; then
+            kill $MAC_AGENT_PID 2>/dev/null || true
+          fi
+          echo "✓ Cleanup complete"

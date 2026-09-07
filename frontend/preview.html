@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Peekaboo — Simulator Preview Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0A0A0F;
+      color: white;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 20px;
+      padding: 20px;
+    }
+    h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+    .status {
+      font-size: 14px;
+      color: #8E8E93;
+      padding: 8px 16px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 20px;
+      transition: all 0.2s ease;
+    }
+    .status.connected { color: #34C759; border-color: rgba(52,199,89,0.3); background: rgba(52,199,89,0.08); }
+    .status.error { color: #FF453A; border-color: rgba(255,69,58,0.3); background: rgba(255,69,58,0.08); }
+    .phone-frame {
+      position: relative;
+      width: 320px;
+      border-radius: 48px;
+      padding: 4px;
+      background: linear-gradient(145deg, #8E8E93, #3A3A3C, #1C1C1E);
+      box-shadow: 0 30px 80px rgba(0,0,0,0.9);
+    }
+    .phone-inner {
+      border-radius: 44px;
+      padding: 10px;
+      background: #1C1C1E;
+    }
+    .phone-screen {
+      border-radius: 36px;
+      overflow: hidden;
+      position: relative;
+      background: #000;
+      cursor: pointer;
+      user-select: none;
+      aspect-ratio: 390/844;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .phone-screen img {
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+      display: block;
+      pointer-events: none;
+    }
+    .loading-screen {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      background: #000;
+      z-index: 10;
+    }
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #0A84FF;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+    }
+    button {
+      background: rgba(255,255,255,0.08);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 10px 20px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    button:hover { background: rgba(255,255,255,0.15); }
+    button.primary {
+      background: #0A84FF;
+      border-color: #0A84FF;
+    }
+    button.primary:hover {
+      background: #0071E3;
+    }
+    .setup {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      width: 100%;
+      max-width: 440px;
+    }
+    .setup-actions {
+      display: flex;
+      gap: 10px;
+    }
+    .setup-actions button {
+      flex: 1;
+    }
+    input {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: white;
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      width: 100%;
+    }
+    input:focus {
+      outline: none;
+      border-color: #0A84FF;
+    }
+    input::placeholder { color: #636366; }
+    .fps { font-size: 13px; color: #8E8E93; font-variant-numeric: tabular-nums; }
+    .dynamic-island {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 110px;
+      height: 30px;
+      background: #000;
+      border-radius: 20px;
+      z-index: 20;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Peekaboo Simulator Test</h1>
+  <div class="status" id="status">Disconnected</div>
+
+  <!-- Setup -->
+  <div class="setup" id="setupPanel">
+    <input
+      id="agentUrl"
+      placeholder="Mac Agent URL (e.g. http://localhost:3001 or https://*.ngrok-free.app)"
+      value="http://localhost:3001"
+    />
+    <input
+      id="appZipUrl"
+      placeholder="App ZIP URL (Supabase signed URL)"
+    />
+    <input
+      id="sessionId"
+      placeholder="Session ID (leave blank to auto-generate or paste active ID)"
+    />
+    <div class="setup-actions">
+      <button class="primary" onclick="startSession()">
+        Launch Simulator
+      </button>
+      <button onclick="connectExistingSession()">
+        Connect to Active
+      </button>
+    </div>
+  </div>
+
+  <!-- Phone frame (hidden until session starts) -->
+  <div class="phone-frame" id="phoneFrame" style="display:none">
+    <div class="phone-inner">
+      <div class="phone-screen" id="phoneScreen"
+        onmousedown="handleMouseDown(event)"
+        onmouseup="handleMouseUp(event)"
+        ontouchstart="handleTouchStart(event)"
+        ontouchend="handleTouchEnd(event)"
+      >
+        <div class="dynamic-island"></div>
+        <div class="loading-screen" id="loadingScreen">
+          <div class="spinner"></div>
+          <p id="loadingMessage" style="color:#8E8E93;font-size:13px">Starting simulator...</p>
+        </div>
+        <img id="frameDisplay" style="display:none" alt="Simulator" draggable="false" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls (hidden until session starts) -->
+  <div class="controls" id="controlsPanel" style="display:none">
+    <span class="fps" id="fpsCounter">-- FPS</span>
+    <button onclick="sendButton('HOME')" title="Press Home / Unlock">Home</button>
+    <button onclick="relaunchApp()" title="Relaunch installed app">Relaunch App</button>
+    <button onclick="takeScreenshot()">Screenshot</button>
+    <button onclick="disconnectSession()">Disconnect</button>
+    <button onclick="endSession()" style="color:#FF453A;border-color:rgba(255,69,58,0.3)">
+      End Session
+    </button>
+  </div>
+
+  <script>
+    let ws = null
+    let sessionId = null
+    let agentUrl = null
+    let frameCount = 0
+    let lastFpsTime = Date.now()
+    let touchStart = null
+    let heartbeatInterval = null
+
+    function setStatus(text, type = '') {
+      const el = document.getElementById('status')
+      el.textContent = text
+      el.className = 'status ' + type
+    }
+
+    function buildWsUrl(baseAgentUrl, id) {
+      const trimmed = baseAgentUrl.replace(/\/+$/, '')
+      const isHttps = trimmed.startsWith('https://')
+      const protocol = isHttps ? 'wss://' : 'ws://'
+      const host = trimmed.replace(/^https?:\/\//, '')
+      return `${protocol}${host}/stream/${id}`
+    }
+
+    async function startSession() {
+      agentUrl = document.getElementById('agentUrl').value.trim().replace(/\/+$/, '')
+      const appZipUrl = document.getElementById('appZipUrl').value.trim()
+      const requestedId = document.getElementById('sessionId').value.trim()
+
+      if (!agentUrl) {
+        alert('Please enter a Mac Agent URL')
+        return
+      }
+
+      // If appZipUrl is empty but sessionId is entered, connect to the existing session
+      if (!appZipUrl && requestedId) {
+        connectExistingSession()
+        return
+      }
+
+      if (!appZipUrl) {
+        alert('Please enter an App ZIP URL (or enter a Session ID to connect to an existing session)')
+        return
+      }
+
+      setStatus('Starting session...', '')
+      document.getElementById('loadingMessage').textContent = 'Starting simulator and installing app...'
+
+      try {
+        const res = await fetch(`${agentUrl}/session/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ appZipUrl, sessionId: requestedId || undefined })
+        })
+
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Failed to start session')
+
+        sessionId = data.sessionId
+        console.log('Session started:', data)
+
+        // Show phone frame
+        document.getElementById('setupPanel').style.display = 'none'
+        document.getElementById('phoneFrame').style.display = 'block'
+        document.getElementById('controlsPanel').style.display = 'flex'
+
+        // Connect WebSocket using agent URL host to support ngrok/remote tunneling
+        const wsUrl = data.wsUrl && (agentUrl.includes('localhost') || agentUrl.includes('127.0.0.1'))
+          ? data.wsUrl
+          : buildWsUrl(agentUrl, sessionId)
+
+        connectWebSocket(wsUrl)
+      } catch (err) {
+        setStatus(`Error: ${err.message}`, 'error')
+        console.error(err)
+      }
+    }
+
+    function connectExistingSession() {
+      agentUrl = document.getElementById('agentUrl').value.trim().replace(/\/+$/, '')
+      const requestedId = document.getElementById('sessionId').value.trim()
+
+      if (!agentUrl) {
+        alert('Please enter a Mac Agent URL')
+        return
+      }
+      if (!requestedId) {
+        alert('Please enter a Session ID')
+        return
+      }
+
+      sessionId = requestedId
+      setStatus(`Connecting to session ${sessionId}...`, '')
+      document.getElementById('loadingMessage').textContent = 'Connecting to stream...'
+
+      document.getElementById('setupPanel').style.display = 'none'
+      document.getElementById('phoneFrame').style.display = 'block'
+      document.getElementById('controlsPanel').style.display = 'flex'
+
+      const wsUrl = buildWsUrl(agentUrl, sessionId)
+      connectWebSocket(wsUrl)
+    }
+
+    function connectWebSocket(wsUrl) {
+      if (ws) {
+        try { ws.close() } catch {}
+      }
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval)
+        heartbeatInterval = null
+      }
+
+      setStatus('Connecting to stream...', '')
+      ws = new WebSocket(wsUrl)
+
+      ws.onopen = () => {
+        setStatus('Connected — streaming', 'connected')
+        heartbeatInterval = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }))
+          }
+        }, 5000)
+      }
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data)
+
+        if (msg.type === 'frame') {
+          const img = document.getElementById('frameDisplay')
+          const loading = document.getElementById('loadingScreen')
+
+          if (loading.style.display !== 'none') {
+            loading.style.display = 'none'
+            img.style.display = 'block'
+          }
+
+          img.src = `data:image/png;base64,${msg.data}`
+
+          // FPS counter
+          frameCount++
+          const now = Date.now()
+          if (now - lastFpsTime >= 1000) {
+            document.getElementById('fpsCounter').textContent = `${frameCount} FPS`
+            frameCount = 0
+            lastFpsTime = now
+          }
+        }
+      }
+
+      ws.onclose = () => {
+        setStatus('Disconnected', 'error')
+        if (heartbeatInterval) clearInterval(heartbeatInterval)
+      }
+
+      ws.onerror = (e) => {
+        setStatus('Connection error', 'error')
+        console.error('WebSocket error:', e)
+      }
+    }
+
+    let dragStart = null
+
+    function getSimCoords(clientX, clientY) {
+      const screen = document.getElementById('phoneScreen')
+      const rect = screen.getBoundingClientRect()
+      const x = Math.max(0, Math.min(390, ((clientX - rect.left) / rect.width) * 390))
+      const y = Math.max(0, Math.min(844, ((clientY - rect.top) / rect.height) * 844))
+      return { x: Math.round(x), y: Math.round(y) }
+    }
+
+    function handleMouseDown(event) {
+      if (event.button !== 0) return // left click only
+      dragStart = getSimCoords(event.clientX, event.clientY)
+    }
+
+    function handleMouseUp(event) {
+      if (!dragStart || !ws || ws.readyState !== WebSocket.OPEN) return
+      const dragEnd = getSimCoords(event.clientX, event.clientY)
+      const dx = dragEnd.x - dragStart.x
+      const dy = dragEnd.y - dragStart.y
+      const dist = Math.hypot(dx, dy)
+
+      if (dist < 8) {
+        // Tap
+        ws.send(JSON.stringify({ type: 'touch', x: dragEnd.x, y: dragEnd.y }))
+        console.log(`[Tap] ${dragEnd.x}, ${dragEnd.y}`)
+      } else {
+        // Swipe / Scroll
+        ws.send(JSON.stringify({
+          type: 'swipe',
+          x1: dragStart.x,
+          y1: dragStart.y,
+          x2: dragEnd.x,
+          y2: dragEnd.y
+        }))
+        console.log(`[Swipe] (${dragStart.x}, ${dragStart.y}) -> (${dragEnd.x}, ${dragEnd.y})`)
+      }
+      dragStart = null
+    }
+
+    function handleTouchStart(event) {
+      event.preventDefault()
+      const touch = event.touches[0]
+      dragStart = getSimCoords(touch.clientX, touch.clientY)
+    }
+
+    function handleTouchEnd(event) {
+      event.preventDefault()
+      if (!dragStart || !ws || ws.readyState !== WebSocket.OPEN) return
+      const touch = event.changedTouches[0]
+      const dragEnd = getSimCoords(touch.clientX, touch.clientY)
+      const dx = dragEnd.x - dragStart.x
+      const dy = dragEnd.y - dragStart.y
+      const dist = Math.hypot(dx, dy)
+
+      if (dist < 8) {
+        ws.send(JSON.stringify({ type: 'touch', x: dragEnd.x, y: dragEnd.y }))
+        console.log(`[Touch Tap] ${dragEnd.x}, ${dragEnd.y}`)
+      } else {
+        ws.send(JSON.stringify({
+          type: 'swipe',
+          x1: dragStart.x,
+          y1: dragStart.y,
+          x2: dragEnd.x,
+          y2: dragEnd.y
+        }))
+        console.log(`[Touch Swipe] (${dragStart.x}, ${dragStart.y}) -> (${dragEnd.x}, ${dragEnd.y})`)
+      }
+      dragStart = null
+    }
+
+    function sendButton(button) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      ws.send(JSON.stringify({ type: 'button', button }))
+      console.log(`[Button] ${button}`)
+    }
+
+    function relaunchApp() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      ws.send(JSON.stringify({ type: 'launchApp' }))
+      console.log('[LaunchApp] Request sent')
+    }
+
+    async function takeScreenshot() {
+      const img = document.getElementById('frameDisplay')
+      if (!img.src) return
+
+      const a = document.createElement('a')
+      a.href = img.src
+      a.download = `simulator-${Date.now()}.png`
+      a.click()
+    }
+
+    function disconnectSession() {
+      if (ws) ws.close()
+      if (heartbeatInterval) clearInterval(heartbeatInterval)
+
+      document.getElementById('setupPanel').style.display = 'flex'
+      document.getElementById('phoneFrame').style.display = 'none'
+      document.getElementById('controlsPanel').style.display = 'none'
+      document.getElementById('loadingScreen').style.display = 'flex'
+      document.getElementById('frameDisplay').style.display = 'none'
+      setStatus('Disconnected from session', '')
+    }
+
+    async function endSession() {
+      if (!sessionId) return
+
+      if (ws) ws.close()
+      if (heartbeatInterval) clearInterval(heartbeatInterval)
+
+      setStatus('Ending session...', '')
+      try {
+        await fetch(`${agentUrl}/session/end`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId })
+        })
+      } catch (e) {
+        console.error('Failed to call session/end:', e)
+      }
+
+      sessionId = null
+      document.getElementById('setupPanel').style.display = 'flex'
+      document.getElementById('phoneFrame').style.display = 'none'
+      document.getElementById('controlsPanel').style.display = 'none'
+      document.getElementById('loadingScreen').style.display = 'flex'
+      document.getElementById('frameDisplay').style.display = 'none'
+      setStatus('Session ended', '')
+    }
+  </script>
+</body>
+</html>

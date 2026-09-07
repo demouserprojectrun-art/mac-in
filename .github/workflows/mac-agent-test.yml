@@ -40,12 +40,15 @@ jobs:
         run: |
           echo "Installing idb-companion and fb-idb..."
           brew tap facebook/fb
+          brew trust facebook/fb
           brew install idb-companion
           pip3 install --break-system-packages fb-idb || pip3 install fb-idb
           echo "idb installed successfully"
 
       - name: Install ngrok for public URL
         run: |
+          brew tap ngrok/ngrok
+          brew trust ngrok/ngrok
           brew install ngrok/ngrok/ngrok
           echo "ngrok installed"
 

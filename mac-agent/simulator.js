@@ -79,9 +79,10 @@ export class SimulatorManager {
         PATH: `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${process.env.PATH || ''}`
       }
 
-      const companion = spawn(binPath, ['--udid', udid, '--port', '10882'], {
+      const idbLog = fs.openSync('/tmp/idb_companion.log', 'a')
+      const companion = spawn(binPath, ['--udid', udid, '--grpc-port', '10882'], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', idbLog, idbLog],
         env
       })
       companion.on('error', (err) => {
@@ -91,14 +92,16 @@ export class SimulatorManager {
       this.activeCompanions.set(udid, companion)
 
       // Wait a moment for companion to spin up
-      await new Promise(r => setTimeout(r, 1500))
+      await new Promise(r => setTimeout(r, 2000))
 
       // Connect idb client
       try {
         await execAsync('idb connect localhost 10882', { env })
         console.log(`✓ idb connected to simulator ${udid}`)
       } catch (e) {
-        console.log(`idb connect note: ${e.message}`)
+        let logContent = ''
+        try { logContent = fs.readFileSync('/tmp/idb_companion.log', 'utf8').slice(-300) } catch {}
+        console.log(`idb connect note: ${e.message}${logContent ? `\nidb-companion log: ${logContent}` : ''}`)
       }
     } catch (err) {
       console.log(`idb-companion note: ${err.message}`)
@@ -173,7 +176,9 @@ export class SimulatorManager {
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '')
       let hint = ''
-      if (response.status === 400) {
+      if (errorBody.includes('NoSuchKey') || errorBody.includes('not_found')) {
+        hint = ' (File does not exist in the Supabase bucket! Check the bucket name, folder path, and file name)'
+      } else if (response.status === 400) {
         hint = ' (Check if signed URL has expired or if token parameter is invalid)'
       }
       throw new Error(`Download failed: ${response.status} ${response.statusText}${hint} - Response: ${errorBody}`)

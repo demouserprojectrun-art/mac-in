@@ -3,7 +3,7 @@ import { promisify } from 'util'
 import fs from 'fs'
 import path from 'path'
 import extractZip from 'extract-zip'
-import { sendTouch, sendSwipe, sendButton } from './touch.js'
+import { sendButton } from './touch.js'
 import { startScreenStream, takeScreenshot } from './stream.js'
 
 const execAsync = promisify(exec)
@@ -46,7 +46,7 @@ export class SimulatorManager {
     await this.waitForBoot(udid)
     console.log(`✓ Simulator booted: ${udid}`)
 
-      // Start idb-companion if installed
+    // Start idb-companion if installed
     await this.startIdb(udid)
   }
 
@@ -54,54 +54,22 @@ export class SimulatorManager {
   async startIdb(udid) {
     try {
       console.log(`Starting idb-companion for ${udid}...`)
-      const candidates = [
-        '/opt/homebrew/bin/idb_companion',
-        '/opt/homebrew/bin/idb-companion',
-        '/usr/local/bin/idb_companion',
-        '/usr/local/bin/idb-companion',
-        'idb_companion',
-        'idb-companion'
-      ]
-      let binPath = candidates.find(p => {
-        try { return fs.existsSync(p) } catch { return false }
-      })
-      if (!binPath) {
-        try {
-          const { stdout } = await execAsync('which idb_companion || which idb-companion')
-          binPath = stdout.trim().split('\n')[0]
-        } catch {}
-      }
-      binPath = binPath || 'idb_companion'
-      console.log(`Using idb-companion binary: ${binPath}`)
-
-      const env = {
-        ...process.env,
-        PATH: `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${process.env.PATH || ''}`
-      }
-
-      const idbLog = fs.openSync('/tmp/idb_companion.log', 'a')
-      const companion = spawn(binPath, ['--udid', udid, '--grpc-port', '10882'], {
+      const companion = spawn('idb-companion', ['--udid', udid, '--port', '10882'], {
         detached: true,
-        stdio: ['ignore', idbLog, idbLog],
-        env
-      })
-      companion.on('error', (err) => {
-        console.warn(`idb-companion spawn warning: ${err.message}`)
+        stdio: 'ignore'
       })
       companion.unref()
       this.activeCompanions.set(udid, companion)
 
       // Wait a moment for companion to spin up
-      await new Promise(r => setTimeout(r, 2000))
+      await new Promise(r => setTimeout(r, 1500))
 
       // Connect idb client
       try {
-        await execAsync('idb connect localhost 10882', { env })
+        await execAsync('idb connect localhost 10882')
         console.log(`✓ idb connected to simulator ${udid}`)
       } catch (e) {
-        let logContent = ''
-        try { logContent = fs.readFileSync('/tmp/idb_companion.log', 'utf8').slice(-300) } catch {}
-        console.log(`idb connect note: ${e.message}${logContent ? `\nidb-companion log: ${logContent}` : ''}`)
+        console.log(`idb connect note: ${e.message}`)
       }
     } catch (err) {
       console.log(`idb-companion note: ${err.message}`)
@@ -110,13 +78,6 @@ export class SimulatorManager {
 
   // Wait until simulator is fully booted
   async waitForBoot(udid, timeout = 120000) {
-    try {
-      await execAsync(`xcrun simctl bootstatus "${udid}" -b`, { timeout: 60000 })
-      return true
-    } catch (e) {
-      console.log(`bootstatus note: ${e.message}, checking device status...`)
-    }
-
     const start = Date.now()
     while (Date.now() - start < timeout) {
       try {
@@ -145,56 +106,15 @@ export class SimulatorManager {
     fs.mkdirSync(tmpDir, { recursive: true })
     fs.mkdirSync(appDir, { recursive: true })
 
-    // Inspect URL and token expiry
-    try {
-      const parsedUrl = new URL(appZipUrl)
-      console.log(`Download source: ${parsedUrl.origin}${parsedUrl.pathname}`)
-      const token = parsedUrl.searchParams.get('token')
-      if (token) {
-        try {
-          const parts = token.split('.')
-          if (parts.length >= 2) {
-            const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'))
-            if (payload.exp) {
-              const expDate = new Date(payload.exp * 1000)
-              const now = new Date()
-              const diffSec = Math.round((expDate.getTime() - now.getTime()) / 1000)
-              console.log(`Token expiry: ${expDate.toISOString()} (${diffSec > 0 ? `${diffSec}s remaining` : `EXPIRED ${Math.abs(diffSec)}s AGO`})`)
-              if (diffSec <= 0) {
-                console.error(`❌ Supabase signed URL has EXPIRED! Please generate a new signed URL with longer expiry (e.g. 3600 seconds).`)
-              }
-            }
-          }
-        } catch {}
-      }
-    } catch (e) {
-      console.warn(`URL parse warning: ${e.message}`)
-    }
-
     // Download app.zip
     const response = await fetch(appZipUrl)
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '')
-      let hint = ''
-      if (errorBody.includes('NoSuchKey') || errorBody.includes('not_found')) {
-        hint = ' (File does not exist in the Supabase bucket! Check the bucket name, folder path, and file name)'
-      } else if (response.status === 400) {
-        hint = ' (Check if signed URL has expired or if token parameter is invalid)'
-      }
-      throw new Error(`Download failed: ${response.status} ${response.statusText}${hint} - Response: ${errorBody}`)
-    }
+    if (!response.ok) throw new Error(`Download failed: ${response.status}`)
     const buffer = await response.arrayBuffer()
     fs.writeFileSync(zipPath, Buffer.from(buffer))
     console.log(`✓ Downloaded: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB`)
 
-    // Extract zip (native unzip preserves symlinks and permissions better in .app bundles)
-    try {
-      await execAsync(`unzip -q -o "${zipPath}" -d "${appDir}"`)
-      console.log('✓ Extracted app using native unzip')
-    } catch (unzipErr) {
-      console.warn(`Native unzip failed (${unzipErr.message}), falling back to extract-zip...`)
-      await extractZip(zipPath, { dir: appDir })
-    }
+    // Extract zip
+    await extractZip(zipPath, { dir: appDir })
 
     // Find .app bundle (supports top-level or nested e.g. Payload/)
     const findAppBundle = (dir) => {
@@ -244,14 +164,48 @@ export class SimulatorManager {
     }
   }
 
-  // Send touch event to simulator
+  // Send single tap
   async sendTouch(udid, x, y) {
-    return sendTouch(udid, x, y)
+    try {
+      // xcrun simctl io requires integer coordinates
+      const ix = Math.round(x)
+      const iy = Math.round(y)
+
+      // Use xdotool-style touch via simctl
+      await execAsync(
+        `xcrun simctl io ${udid} sendEvent touch ${ix} ${iy}`
+      )
+    } catch (err) {
+      // Fallback — use AppleScript to click in simulator window
+      try {
+        await execAsync(`osascript -e '
+          tell application "Simulator" to activate
+          tell application "System Events"
+            tell process "Simulator"
+              click at {${Math.round(x)}, ${Math.round(y)}}
+            end tell
+          end tell
+        '`)
+      } catch (e) {
+        console.error('Touch fallback also failed:', e.message)
+      }
+    }
   }
 
-  // Send swipe event to simulator
+  // Send swipe gesture
   async sendSwipe(udid, x1, y1, x2, y2) {
-    return sendSwipe(udid, x1, y1, x2, y2)
+    try {
+      // Simulate swipe as series of touch events
+      const steps = 10
+      for (let i = 0; i <= steps; i++) {
+        const x = Math.round(x1 + (x2 - x1) * (i / steps))
+        const y = Math.round(y1 + (y2 - y1) * (i / steps))
+        await execAsync(`xcrun simctl io ${udid} sendEvent touch ${x} ${y}`)
+        await new Promise(r => setTimeout(r, 20))
+      }
+    } catch (err) {
+      console.error('Swipe error:', err.message)
+    }
   }
 
   // Send button event to simulator

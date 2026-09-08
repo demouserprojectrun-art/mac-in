@@ -184,8 +184,6 @@
   <div class="phone-frame" id="phoneFrame" style="display:none">
     <div class="phone-inner">
       <div class="phone-screen" id="phoneScreen"
-        onmousedown="handleMouseDown(event)"
-        onmouseup="handleMouseUp(event)"
         ontouchstart="handleTouchStart(event)"
         ontouchend="handleTouchEnd(event)"
       >
@@ -217,8 +215,6 @@
     let agentUrl = null
     let frameCount = 0
     let lastFpsTime = Date.now()
-    let touchStart = null
-    let heartbeatInterval = null
 
     function setStatus(text, type = '') {
       const el = document.getElementById('status')
@@ -314,41 +310,49 @@
     }
 
     function connectWebSocket(wsUrl) {
-      if (ws) {
-        try { ws.close() } catch {}
-      }
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval)
-        heartbeatInterval = null
-      }
+      // Convert http ngrok URL to wss
+      const wsUrlFixed = wsUrl
+        .replace('https://', 'wss://')
+        .replace('http://', 'ws://')
 
       setStatus('Connecting to stream...', '')
-      ws = new WebSocket(wsUrl)
+      ws = new WebSocket(wsUrlFixed)
 
       ws.onopen = () => {
         setStatus('Connected — streaming', 'connected')
-        heartbeatInterval = setInterval(() => {
-          if (ws && ws.readyState === WebSocket.OPEN) {
+        // Heartbeat every 10 seconds
+        const heartbeat = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }))
+          } else {
+            clearInterval(heartbeat)
           }
-        }, 5000)
+        }, 10000)
+      }
+
+      ws.onclose = () => {
+        setStatus('Disconnected — reconnecting...', 'error')
+        // Auto reconnect after 3 seconds
+        setTimeout(() => {
+          if (sessionId) connectWebSocket(wsUrl)
+        }, 3000)
+      }
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err)
+        setStatus('Connection error', 'error')
       }
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data)
-
         if (msg.type === 'frame') {
           const img = document.getElementById('frameDisplay')
           const loading = document.getElementById('loadingScreen')
-
           if (loading.style.display !== 'none') {
             loading.style.display = 'none'
             img.style.display = 'block'
           }
-
           img.src = `data:image/png;base64,${msg.data}`
-
-          // FPS counter
           frameCount++
           const now = Date.now()
           if (now - lastFpsTime >= 1000) {
@@ -358,88 +362,94 @@
           }
         }
       }
-
-      ws.onclose = () => {
-        setStatus('Disconnected', 'error')
-        if (heartbeatInterval) clearInterval(heartbeatInterval)
-      }
-
-      ws.onerror = (e) => {
-        setStatus('Connection error', 'error')
-        console.error('WebSocket error:', e)
-      }
     }
 
-    let dragStart = null
-
-    function getSimCoords(clientX, clientY) {
-      const screen = document.getElementById('phoneScreen')
-      const rect = screen.getBoundingClientRect()
-      const x = Math.max(0, Math.min(390, ((clientX - rect.left) / rect.width) * 390))
-      const y = Math.max(0, Math.min(844, ((clientY - rect.top) / rect.height) * 844))
-      return { x: Math.round(x), y: Math.round(y) }
-    }
-
-    function handleMouseDown(event) {
-      if (event.button !== 0) return // left click only
-      dragStart = getSimCoords(event.clientX, event.clientY)
-    }
-
-    function handleMouseUp(event) {
-      if (!dragStart || !ws || ws.readyState !== WebSocket.OPEN) return
-      const dragEnd = getSimCoords(event.clientX, event.clientY)
-      const dx = dragEnd.x - dragStart.x
-      const dy = dragEnd.y - dragStart.y
-      const dist = Math.hypot(dx, dy)
-
-      if (dist < 8) {
-        // Tap
-        ws.send(JSON.stringify({ type: 'touch', x: dragEnd.x, y: dragEnd.y }))
-        console.log(`[Tap] ${dragEnd.x}, ${dragEnd.y}`)
-      } else {
-        // Swipe / Scroll
-        ws.send(JSON.stringify({
-          type: 'swipe',
-          x1: dragStart.x,
-          y1: dragStart.y,
-          x2: dragEnd.x,
-          y2: dragEnd.y
-        }))
-        console.log(`[Swipe] (${dragStart.x}, ${dragStart.y}) -> (${dragEnd.x}, ${dragEnd.y})`)
-      }
-      dragStart = null
-    }
+    let touchStartPos = null
+    let touchStartTime = null
 
     function handleTouchStart(event) {
       event.preventDefault()
       const touch = event.touches[0]
-      dragStart = getSimCoords(touch.clientX, touch.clientY)
+      const screen = document.getElementById('phoneScreen')
+      const rect = screen.getBoundingClientRect()
+      touchStartPos = {
+        x: ((touch.clientX - rect.left) / rect.width) * 390,
+        y: ((touch.clientY - rect.top) / rect.height) * 844
+      }
+      touchStartTime = Date.now()
     }
 
     function handleTouchEnd(event) {
       event.preventDefault()
-      if (!dragStart || !ws || ws.readyState !== WebSocket.OPEN) return
-      const touch = event.changedTouches[0]
-      const dragEnd = getSimCoords(touch.clientX, touch.clientY)
-      const dx = dragEnd.x - dragStart.x
-      const dy = dragEnd.y - dragStart.y
-      const dist = Math.hypot(dx, dy)
+      if (!touchStartPos || !ws || ws.readyState !== WebSocket.OPEN) return
 
-      if (dist < 8) {
-        ws.send(JSON.stringify({ type: 'touch', x: dragEnd.x, y: dragEnd.y }))
-        console.log(`[Touch Tap] ${dragEnd.x}, ${dragEnd.y}`)
+      const touch = event.changedTouches[0]
+      const screen = document.getElementById('phoneScreen')
+      const rect = screen.getBoundingClientRect()
+
+      const endX = ((touch.clientX - rect.left) / rect.width) * 390
+      const endY = ((touch.clientY - rect.top) / rect.height) * 844
+      const duration = Date.now() - touchStartTime
+
+      const dx = Math.abs(endX - touchStartPos.x)
+      const dy = Math.abs(endY - touchStartPos.y)
+
+      if (dx < 10 && dy < 10) {
+        // Tap
+        ws.send(JSON.stringify({
+          type: 'touch',
+          x: touchStartPos.x,
+          y: touchStartPos.y
+        }))
+      } else {
+        // Swipe
+        ws.send(JSON.stringify({
+          type: 'swipe',
+          x1: touchStartPos.x,
+          y1: touchStartPos.y,
+          x2: endX,
+          y2: endY
+        }))
+      }
+
+      touchStartPos = null
+    }
+
+    // Also handle mouse swipe for desktop testing
+    let mouseDown = false
+    let mouseStart = null
+
+    document.getElementById('phoneScreen').addEventListener('mousedown', (e) => {
+      mouseDown = true
+      const rect = e.currentTarget.getBoundingClientRect()
+      mouseStart = {
+        x: ((e.clientX - rect.left) / rect.width) * 390,
+        y: ((e.clientY - rect.top) / rect.height) * 844
+      }
+    })
+
+    document.getElementById('phoneScreen').addEventListener('mouseup', (e) => {
+      if (!mouseDown || !mouseStart || !ws) return
+      mouseDown = false
+
+      const rect = e.currentTarget.getBoundingClientRect()
+      const endX = ((e.clientX - rect.left) / rect.width) * 390
+      const endY = ((e.clientY - rect.top) / rect.height) * 844
+
+      const dx = Math.abs(endX - mouseStart.x)
+      const dy = Math.abs(endY - mouseStart.y)
+
+      if (dx < 10 && dy < 10) {
+        ws.send(JSON.stringify({ type: 'touch', x: mouseStart.x, y: mouseStart.y }))
       } else {
         ws.send(JSON.stringify({
           type: 'swipe',
-          x1: dragStart.x,
-          y1: dragStart.y,
-          x2: dragEnd.x,
-          y2: dragEnd.y
+          x1: mouseStart.x, y1: mouseStart.y,
+          x2: endX, y2: endY
         }))
-        console.log(`[Touch Swipe] (${dragStart.x}, ${dragStart.y}) -> (${dragEnd.x}, ${dragEnd.y})`)
       }
-      dragStart = null
-    }
+      mouseStart = null
+    })
 
     function sendButton(button) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return
@@ -464,8 +474,11 @@
     }
 
     function disconnectSession() {
-      if (ws) ws.close()
-      if (heartbeatInterval) clearInterval(heartbeatInterval)
+      sessionId = null
+      if (ws) {
+        ws.onclose = null
+        ws.close()
+      }
 
       document.getElementById('setupPanel').style.display = 'flex'
       document.getElementById('phoneFrame').style.display = 'none'
@@ -478,21 +491,25 @@
     async function endSession() {
       if (!sessionId) return
 
-      if (ws) ws.close()
-      if (heartbeatInterval) clearInterval(heartbeatInterval)
+      const toEnd = sessionId
+      sessionId = null
+
+      if (ws) {
+        ws.onclose = null
+        ws.close()
+      }
 
       setStatus('Ending session...', '')
       try {
         await fetch(`${agentUrl}/session/end`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId })
+          body: JSON.stringify({ sessionId: toEnd })
         })
       } catch (e) {
         console.error('Failed to call session/end:', e)
       }
 
-      sessionId = null
       document.getElementById('setupPanel').style.display = 'flex'
       document.getElementById('phoneFrame').style.display = 'none'
       document.getElementById('controlsPanel').style.display = 'none'

@@ -40,26 +40,24 @@ jobs:
         run: |
           echo "Installing idb-companion and fb-idb..."
           brew tap facebook/fb
-          brew trust facebook/fb
+          brew trust facebook/fb || brew trust --formula facebook/fb/idb-companion || true
           brew install idb-companion
           pip3 install --break-system-packages fb-idb || pip3 install fb-idb
           echo "idb installed successfully"
 
       - name: Install ngrok for public URL
         run: |
-          brew tap ngrok/ngrok
-          brew trust ngrok/ngrok
           brew install ngrok/ngrok/ngrok
           echo "ngrok installed"
 
       - name: Start Mac Agent
         run: |
           cd mac-agent
-          nohup node index.js > mac-agent.log 2>&1 &
+          node index.js &
           echo "MAC_AGENT_PID=$!" >> $GITHUB_ENV
           
           # Wait for health check
-          for i in {1..30}; do
+          for i in {1..15}; do
             if curl -s http://localhost:3001/health >/dev/null; then
               echo "Mac Agent is healthy"
               break
@@ -68,11 +66,7 @@ jobs:
           done
 
           # Verify agent is running
-          if ! curl -s http://localhost:3001/health | python3 -m json.tool; then
-            echo "Mac Agent failed to start. Logs:"
-            cat mac-agent.log
-            exit 1
-          fi
+          curl -s http://localhost:3001/health | python3 -m json.tool
 
       - name: Expose agent via ngrok
         env:
@@ -120,24 +114,14 @@ jobs:
           echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
 
       - name: Start session automatically
-        env:
-          APP_ZIP_URL: ${{ github.event.inputs.app_zip_url }}
         run: |
           echo "Starting simulator session..."
-          # Safely encode JSON payload via python to avoid bash quoting/escaping bugs
-          JSON_PAYLOAD=$(python3 -c 'import json, os; print(json.dumps({"appZipUrl": os.environ["APP_ZIP_URL"].strip()}))')
-
-          SESSION=$(curl -s -S -X POST http://localhost:3001/session/start \
+          SESSION=$(curl -s -X POST http://localhost:3001/session/start \
             -H "Content-Type: application/json" \
-            -d "$JSON_PAYLOAD" || {
-              echo "curl failed with exit code $?!"
-              echo "=== Mac Agent Log ==="
-              cat mac-agent/mac-agent.log 2>/dev/null || true
-              exit 1
-            })
+            -d "{\"appZipUrl\": \"${{ github.event.inputs.app_zip_url }}\"}")
 
           echo "Session response:"
-          echo "$SESSION" | python3 -m json.tool || echo "$SESSION"
+          echo "$SESSION" | python3 -m json.tool
 
           SESSION_ID=$(echo "$SESSION" | python3 -c "
           import json,sys
@@ -147,14 +131,6 @@ jobs:
           except:
               pass
           ")
-
-          if [ -z "$SESSION_ID" ]; then
-            echo "Failed to obtain sessionId from response!"
-            echo "=== Mac Agent Log ==="
-            cat mac-agent/mac-agent.log 2>/dev/null || true
-            exit 1
-          fi
-
           echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
           echo ""
           echo "========================================"
@@ -167,13 +143,6 @@ jobs:
         with:
           limit-access-to-actor: false
         timeout-minutes: ${{ fromJSON(github.event.inputs.session_duration) }}
-
-      - name: Print Mac Agent Logs
-        if: always()
-        run: |
-          echo "=== Mac Agent Log ==="
-          cat mac-agent/mac-agent.log 2>/dev/null || true
-          echo "======================"
 
       - name: Cleanup
         if: always()

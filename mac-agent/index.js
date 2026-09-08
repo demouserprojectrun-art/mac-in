@@ -5,22 +5,9 @@ import { createServer } from 'http'
 import { v4 as uuidv4 } from 'uuid'
 import { SimulatorManager } from './simulator.js'
 
-process.on('uncaughtException', (err) => {
-  console.error('[FATAL] Uncaught Exception:', err)
-})
-process.on('unhandledRejection', (reason) => {
-  console.error('[FATAL] Unhandled Rejection:', reason)
-})
-
 const PORT = process.env.PORT || 3001
 const app = express()
 const server = createServer(app)
-
-// Increase timeouts for long simulator boot / download operations (10 mins)
-server.timeout = 600000
-server.keepAliveTimeout = 600000
-server.headersTimeout = 610000
-
 const wss = new WebSocketServer({ server })
 
 app.use(cors())
@@ -188,25 +175,29 @@ wss.on('connection', (ws, req) => {
     try {
       const msg = JSON.parse(message.toString())
 
-      if (msg.type === 'touch') {
-        await simulator.sendTouch(session.udid, msg.x, msg.y)
-      }
+    if (msg.type === 'touch') {
+      await simulator.sendTouch(session.udid, msg.x, msg.y)
+    }
 
-      if (msg.type === 'swipe') {
-        await simulator.sendSwipe(session.udid, msg.x1, msg.y1, msg.x2, msg.y2)
-      }
+    if (msg.type === 'swipe') {
+      await simulator.sendSwipe(
+        session.udid,
+        msg.x1, msg.y1,
+        msg.x2, msg.y2
+      )
+    }
 
-      if (msg.type === 'button') {
-        await simulator.sendButton(session.udid, msg.button || 'HOME')
-      }
+    if (msg.type === 'button') {
+      await simulator.sendButton(session.udid, msg.button || 'HOME')
+    }
 
-      if (msg.type === 'launchApp') {
-        await simulator.launchApp(session.udid, session.bundleId)
-      }
+    if (msg.type === 'launchApp') {
+      await simulator.launchApp(session.udid, session.bundleId)
+    }
 
-      if (msg.type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong' }))
-      }
+    if (msg.type === 'ping') {
+      ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }))
+    }
     } catch (err) {
       console.error('Message error:', err)
     }

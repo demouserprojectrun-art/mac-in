@@ -24,7 +24,7 @@ export class SimulatorManager {
       for (const device of devices) {
         if (device.isAvailable && device.name.includes('iPhone')) {
           console.log(`Found simulator: ${device.name} (${device.udid})`)
-          return { udid: device.udid, name: device.name }
+          return device.udid
         }
       }
     }
@@ -33,120 +33,62 @@ export class SimulatorManager {
 
   // Boot simulator
   async bootSimulator(udid) {
-    console.log(`Booting simulator: ${udid}`)
+    console.log(`Booting simulator ${udid}...`)
+    
+    // Boot it
     try {
-      await execAsync(`xcrun simctl boot ${udid}`)
+      await execAsync(`xcrun simctl boot "${udid}"`)
     } catch (err) {
       // Already booted is fine
       if (!err.message.includes('Unable to boot device in current state')) {
         throw err
       }
     }
-    // Wait for boot
-    await this.waitForBoot(udid)
-    console.log(`✓ Simulator booted: ${udid}`)
 
-    // Start idb-companion if installed
-    await this.startIdb(udid)
-  }
-
-  // Start idb-companion for simulator if available
-  async startIdb(udid) {
-    try {
-      console.log(`Starting idb-companion for ${udid}...`)
-      const companion = spawn('idb-companion', ['--udid', udid, '--port', '10882'], {
-        detached: true,
-        stdio: 'ignore'
-      })
-      companion.unref()
-      this.activeCompanions.set(udid, companion)
-
-      // Wait a moment for companion to spin up
-      await new Promise(r => setTimeout(r, 1500))
-
-      // Connect idb client
-      try {
-        await execAsync('idb connect localhost 10882')
-        console.log(`✓ idb connected to simulator ${udid}`)
-      } catch (e) {
-        console.log(`idb connect note: ${e.message}`)
-      }
-    } catch (err) {
-      console.log(`idb-companion note: ${err.message}`)
-    }
-  }
-
-  // Wait until simulator is fully booted
-  async waitForBoot(udid, timeout = 120000) {
+    // Wait for booted state with a timeout
+    const timeout = 60000 // 60s max
     const start = Date.now()
     while (Date.now() - start < timeout) {
-      try {
-        const { stdout } = await execAsync(`xcrun simctl list devices -j`)
-        const data = JSON.parse(stdout)
-        for (const devices of Object.values(data.devices)) {
-          for (const device of devices) {
-            if (device.udid === udid && device.state === 'Booted') {
-              return true
-            }
-          }
-        }
-      } catch {}
+      const { stdout } = await execAsync(`xcrun simctl list devices`)
+      if (stdout.includes(`${udid}) (Booted)`)) {
+        console.log(`Simulator ${udid} is booted`)
+        return
+      }
       await new Promise(r => setTimeout(r, 2000))
     }
-    throw new Error('Simulator boot timeout')
+    throw new Error(`Simulator ${udid} did not boot within 60s`)
   }
 
   // Download and install app
   async installApp(udid, appZipUrl, sessionId) {
-    console.log(`Downloading app for session: ${sessionId}`)
-    const tmpDir = `/tmp/peekaboo_${sessionId}`
+    const tmpDir = `/tmp/peekaboo-${sessionId}`
     const zipPath = `${tmpDir}/app.zip`
-    const appDir = `${tmpDir}/app`
-
-    fs.mkdirSync(tmpDir, { recursive: true })
-    fs.mkdirSync(appDir, { recursive: true })
-
-    // Download app.zip
-    const response = await fetch(appZipUrl)
-    if (!response.ok) throw new Error(`Download failed: ${response.status}`)
-    const buffer = await response.arrayBuffer()
-    fs.writeFileSync(zipPath, Buffer.from(buffer))
-    console.log(`✓ Downloaded: ${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB`)
-
-    // Extract zip
-    await extractZip(zipPath, { dir: appDir })
-
-    // Find .app bundle (supports top-level or nested e.g. Payload/)
-    const findAppBundle = (dir) => {
-      const files = fs.readdirSync(dir, { withFileTypes: true })
-      for (const file of files) {
-        if (file.name.endsWith('.app')) {
-          return path.join(dir, file.name)
-        }
-        if (file.isDirectory()) {
-          const nested = findAppBundle(path.join(dir, file.name))
-          if (nested) return nested
-        }
-      }
-      return null
-    }
-
-    const appPath = findAppBundle(appDir)
-    if (!appPath) throw new Error('No .app found in zip')
-
-    const appBundle = path.basename(appPath)
-    console.log(`Found app bundle: ${appBundle}`)
-
-    // Install on simulator
-    await execAsync(`xcrun simctl install ${udid} "${appPath}"`)
-    console.log(`✓ App installed`)
-
-    // Get bundle ID from Info.plist
-    const { stdout: bundleId } = await execAsync(
-      `/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "${appPath}/Info.plist"`
+    
+    await execAsync(`mkdir -p "${tmpDir}"`)
+    
+    console.log(`Downloading app zip...`)
+    // 60s download timeout
+    await execAsync(`curl -L --max-time 60 -o "${zipPath}" "${appZipUrl}"`)
+    
+    const { stdout: sizeOut } = await execAsync(`du -sh "${zipPath}"`)
+    console.log(`Downloaded: ${sizeOut.trim()}`)
+    
+    await execAsync(`unzip -o "${zipPath}" -d "${tmpDir}"`)
+    
+    const { stdout: appPath } = await execAsync(`find "${tmpDir}" -name "*.app" -not -name "*.appex" | head -1`)
+    const app = appPath.trim()
+    if (!app) throw new Error('No .app found in zip')
+    
+    console.log(`Installing app: ${app}`)
+    await execAsync(`xcrun simctl install "${udid}" "${app}"`)
+    
+    // Extract bundle ID
+    const { stdout: plistOut } = await execAsync(
+      `/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "${app}/Info.plist" 2>/dev/null || defaults read "${app}/Info.plist" CFBundleIdentifier`
     )
-
-    return bundleId.trim()
+    const extractedBundleId = plistOut.trim()
+    console.log(`Bundle ID: ${extractedBundleId}`)
+    return extractedBundleId
   }
 
   // Launch app on simulator

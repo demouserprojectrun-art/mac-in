@@ -113,22 +113,25 @@ jobs:
           echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
 
       - name: Start simulator session
+        continue-on-error: true  # Don't kill the job — let tmate open so you can debug
         env:
           APP_ZIP_URL: ${{ secrets.APP_ZIP_URL || github.event.inputs.app_zip_url }}
         run: |
           echo "Starting simulator session..."
-          SESSION=$(curl -s --max-time 120 -X POST http://localhost:3001/session/start \
+          SESSION=$(curl -v --max-time 120 -X POST http://localhost:3001/session/start \
             -H "Content-Type: application/json" \
-            -d "{\"appZipUrl\": \"$APP_ZIP_URL\"}")
+            -d "{\"appZipUrl\": \"$APP_ZIP_URL\"}" 2>&1)
           echo "Session response:"
-          echo "$SESSION" | python3 -m json.tool || echo "$SESSION"
-          SESSION_ID=$(echo "$SESSION" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('sessionId',''))" 2>/dev/null || echo "")
+          echo "$SESSION"
+          SESSION_ID=$(echo "$SESSION" | python3 -c "import json,sys,re; m=re.search(r'\{.*\}', sys.stdin.read(), re.DOTALL); print(json.loads(m.group(0)).get('sessionId','')) if m else print('')" 2>/dev/null || echo "")
           echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
-          echo ""
-          echo "========================================"
-          echo "✓ Session started: $SESSION_ID"
-          echo "WebSocket URL: $NGROK_URL/stream/$SESSION_ID"
-          echo "========================================"
+          if [ -n "$SESSION_ID" ]; then
+            echo ""
+            echo "========================================"
+            echo "✓ Session started: $SESSION_ID"
+            echo "WebSocket URL: $NGROK_URL/stream/$SESSION_ID"
+            echo "========================================"
+          fi
 
       - name: Enable SSH access for debugging
         uses: mxschmitt/action-tmate@v3

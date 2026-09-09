@@ -1,3 +1,13 @@
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION:', err.message)
+  console.error(err.stack)
+  // Don't exit — keep the server alive so curl gets a response
+})
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION:', reason)
+})
+
 import express from 'express'
 import { WebSocketServer } from 'ws'
 import cors from 'cors'
@@ -21,6 +31,7 @@ app.use(express.json())
 
 const simulator = new SimulatorManager()
 const sessions = new Map() // sessionId → { udid, bundleId, stopStream, ws }
+const activeSessions = sessions
 
 // Health check
 app.get('/health', (req, res) => {
@@ -64,69 +75,62 @@ app.get('/session/:id', (req, res) => {
 
 // Start a new session
 app.post('/session/start', async (req, res) => {
-  // Set a server-side timeout so Express doesn't hang the connection
   req.setTimeout(110000)
   res.setTimeout(110000)
 
+  const { appZipUrl, bundleId } = req.body || {}
+  if (!appZipUrl) {
+    return res.status(400).json({ error: 'appZipUrl required' })
+  }
+
+  const sessionId = uuidv4()
+  console.log(`[${sessionId}] Starting session...`)
+
   try {
-    const { appZipUrl, sessionId: requestedId, bundleId: providedBundleId } = req.body
+    console.log(`[${sessionId}] Finding simulator...`)
+    const udid = await simulator.findAvailableSimulator()
+    console.log(`[${sessionId}] Found simulator: ${udid}`)
 
-    // If session already exists, return existing connection info
-    if (requestedId && sessions.has(requestedId)) {
-      const existing = sessions.get(requestedId)
-      const host = req.get('host') || `localhost:${PORT}`
-      const protocol = (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') ? 'wss' : 'ws'
-      return res.json({
-        success: true,
-        sessionId: requestedId,
-        simulatorName: 'Existing Simulator',
-        udid: existing.udid,
-        bundleId: existing.bundleId,
-        wsUrl: `${protocol}://${host}/stream/${requestedId}`
-      })
-    }
-
-    if (!appZipUrl) {
-      return res.status(400).json({ error: 'appZipUrl required' })
-    }
-
-    const sessionId = requestedId || uuidv4()
-    console.log(`\n=== Starting session: ${sessionId} ===`)
-
-    // Find and boot simulator
-    const { udid, name } = await simulator.findAvailableSimulator()
+    console.log(`[${sessionId}] Booting simulator...`)
     await simulator.bootSimulator(udid)
+    console.log(`[${sessionId}] Simulator booted`)
 
-    // Install app
-    const bundleId = providedBundleId || await simulator.installApp(udid, appZipUrl, sessionId)
+    console.log(`[${sessionId}] Installing app from: ${appZipUrl.substring(0, 60)}...`)
+    const resolvedBundleId = await simulator.installApp(udid, appZipUrl, sessionId)
+    console.log(`[${sessionId}] App installed, bundleId: ${resolvedBundleId}`)
 
-    // Launch app
-    await simulator.launchApp(udid, bundleId)
+    console.log(`[${sessionId}] Launching app...`)
+    await simulator.launchApp(udid, resolvedBundleId || bundleId)
+    console.log(`[${sessionId}] App launched`)
 
-    // Store session
-    simulator.activeSimulators.set(sessionId, udid)
-    sessions.set(sessionId, { udid, bundleId, stopStream: null, ws: null })
+    // Start streaming
+    const stopStream = simulator.startScreenStream(udid, (frame) => {
+      // store frame for websocket clients
+      const sess = activeSessions.get(sessionId)
+      if (sess?.ws && sess.ws.readyState === 1) {
+        sess.ws.send(JSON.stringify({
+          type: 'frame',
+          data: frame,
+          timestamp: Date.now()
+        }))
+      }
+    })
 
-    console.log(`✓ Session ready: ${sessionId}`)
+    activeSessions.set(sessionId, { udid, bundleId: resolvedBundleId || bundleId, stopStream, ws: null })
 
-    const host = req.get('host') || `localhost:${PORT}`
-    const protocol = (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') ? 'wss' : 'ws'
+    console.log(`[${sessionId}] ✅ Session ready`)
+    return res.json({ sessionId, udid, bundleId: resolvedBundleId || bundleId, status: 'ready' })
 
-    if (!res.headersSent) {
-      res.json({
-        success: true,
-        sessionId,
-        simulatorName: name,
-        udid,
-        bundleId,
-        wsUrl: `${protocol}://${host}/stream/${sessionId}`
-      })
-    }
   } catch (err) {
-    console.error('Session start error:', err)
-    // Make sure we always respond — never leave curl hanging
+    console.error(`[${sessionId}] ❌ Session start failed:`, err.message)
+    console.error(err.stack)
+    // Always respond — never leave curl hanging
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message })
+      return res.status(500).json({ 
+        error: err.message, 
+        sessionId,
+        stack: err.stack 
+      })
     }
   }
 })

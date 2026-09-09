@@ -8,6 +8,12 @@ import { SimulatorManager } from './simulator.js'
 const PORT = process.env.PORT || 3001
 const app = express()
 const server = createServer(app)
+
+// Configure server timeouts (120s) to allow time for simulator boot & download
+server.timeout = 120000
+server.keepAliveTimeout = 120000
+server.headersTimeout = 125000
+
 const wss = new WebSocketServer({ server })
 
 app.use(cors())
@@ -58,37 +64,41 @@ app.get('/session/:id', (req, res) => {
 
 // Start a new session
 app.post('/session/start', async (req, res) => {
-  const { appZipUrl, sessionId: requestedId } = req.body
-
-  // If session already exists, return existing connection info
-  if (requestedId && sessions.has(requestedId)) {
-    const existing = sessions.get(requestedId)
-    const host = req.get('host') || `localhost:${PORT}`
-    const protocol = (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') ? 'wss' : 'ws'
-    return res.json({
-      success: true,
-      sessionId: requestedId,
-      simulatorName: 'Existing Simulator',
-      udid: existing.udid,
-      bundleId: existing.bundleId,
-      wsUrl: `${protocol}://${host}/stream/${requestedId}`
-    })
-  }
-
-  if (!appZipUrl) {
-    return res.status(400).json({ error: 'appZipUrl required' })
-  }
-
-  const sessionId = requestedId || uuidv4()
-  console.log(`\n=== Starting session: ${sessionId} ===`)
+  // Set a server-side timeout so Express doesn't hang the connection
+  req.setTimeout(110000)
+  res.setTimeout(110000)
 
   try {
+    const { appZipUrl, sessionId: requestedId, bundleId: providedBundleId } = req.body
+
+    // If session already exists, return existing connection info
+    if (requestedId && sessions.has(requestedId)) {
+      const existing = sessions.get(requestedId)
+      const host = req.get('host') || `localhost:${PORT}`
+      const protocol = (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') ? 'wss' : 'ws'
+      return res.json({
+        success: true,
+        sessionId: requestedId,
+        simulatorName: 'Existing Simulator',
+        udid: existing.udid,
+        bundleId: existing.bundleId,
+        wsUrl: `${protocol}://${host}/stream/${requestedId}`
+      })
+    }
+
+    if (!appZipUrl) {
+      return res.status(400).json({ error: 'appZipUrl required' })
+    }
+
+    const sessionId = requestedId || uuidv4()
+    console.log(`\n=== Starting session: ${sessionId} ===`)
+
     // Find and boot simulator
     const { udid, name } = await simulator.findAvailableSimulator()
     await simulator.bootSimulator(udid)
 
     // Install app
-    const bundleId = await simulator.installApp(udid, appZipUrl, sessionId)
+    const bundleId = providedBundleId || await simulator.installApp(udid, appZipUrl, sessionId)
 
     // Launch app
     await simulator.launchApp(udid, bundleId)
@@ -102,17 +112,22 @@ app.post('/session/start', async (req, res) => {
     const host = req.get('host') || `localhost:${PORT}`
     const protocol = (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') ? 'wss' : 'ws'
 
-    res.json({
-      success: true,
-      sessionId,
-      simulatorName: name,
-      udid,
-      bundleId,
-      wsUrl: `${protocol}://${host}/stream/${sessionId}`
-    })
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        sessionId,
+        simulatorName: name,
+        udid,
+        bundleId,
+        wsUrl: `${protocol}://${host}/stream/${sessionId}`
+      })
+    }
   } catch (err) {
-    console.error('Session start failed:', err)
-    res.status(500).json({ error: err.message })
+    console.error('Session start error:', err)
+    // Make sure we always respond — never leave curl hanging
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message })
+    }
   }
 })
 

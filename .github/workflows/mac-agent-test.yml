@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       app_zip_url:
-        description: 'Supabase signed URL for app.zip'
-        required: true
+        description: 'Supabase signed URL for app.zip (optional if APP_ZIP_URL secret is set)'
+        required: false
       session_duration:
         description: 'How long to keep session alive (minutes)'
         default: '30'
@@ -109,28 +109,20 @@ jobs:
           echo "frontend/preview.html"
           echo ""
           echo "Set Agent URL to: $NGROK_URL"
-          echo "Set App ZIP URL to: ${{ github.event.inputs.app_zip_url }}"
           echo "========================================"
           echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
 
-      - name: Start session automatically
+      - name: Start simulator session
+        env:
+          APP_ZIP_URL: ${{ secrets.APP_ZIP_URL || github.event.inputs.app_zip_url }}
         run: |
           echo "Starting simulator session..."
-          SESSION=$(curl -s -X POST http://localhost:3001/session/start \
+          SESSION=$(curl -s --max-time 120 -X POST http://localhost:3001/session/start \
             -H "Content-Type: application/json" \
-            -d "{\"appZipUrl\": \"${{ github.event.inputs.app_zip_url }}\"}")
-
+            -d "{\"appZipUrl\": \"$APP_ZIP_URL\"}")
           echo "Session response:"
-          echo "$SESSION" | python3 -m json.tool
-
-          SESSION_ID=$(echo "$SESSION" | python3 -c "
-          import json,sys
-          try:
-              data=json.load(sys.stdin)
-              print(data.get('sessionId',''))
-          except:
-              pass
-          ")
+          echo "$SESSION" | python3 -m json.tool || echo "$SESSION"
+          SESSION_ID=$(echo "$SESSION" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('sessionId',''))" 2>/dev/null || echo "")
           echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
           echo ""
           echo "========================================"
